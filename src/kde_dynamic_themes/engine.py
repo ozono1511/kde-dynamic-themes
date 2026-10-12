@@ -1,0 +1,274 @@
+"""V2.3: direct theme switching, immutable stable baseline, transactional recovery.
+No background service; no KWin changes. The black baseline is a 1x1 solid black PNG.
+"""
+import json
+import fcntl
+from contextlib import contextmanager
+import os
+import shutil
+import struct
+import subprocess
+import tempfile
+import zlib
+from datetime import datetime
+from pathlib import Path
+from .snapshot import sha256, wallpapers_from_config
+from .platform import read_host_config
+from .wallpaper import _safe_image, _run, _verify, RECORD, ACTIVE_CONFIG, get_targets
+from .colors import (ROOT, CONFIG, COLOR_DIR, KONSOLE_DIR, STATE, APPLY_COLORS,
+    extract, kde_scheme, konsole_scheme, _config_get, _effective_scheme, _scheme_id,
+    _apply_colors, _kwrite, _restore_key)
+
+BASELINE = ROOT / 'config' / 'baseline-v2.3.json'
+ACTIVE = ROOT / 'config' / 'active-v2.3.json'
+JOURNAL = ROOT / 'config' / 'transaction-v2.3.json'
+BLACK = ROOT / 'config' / 'baseline-black.png'
+BACKUPS = ROOT / 'backups'
+HOST = read_host_config()
+PROFILE_NAME = HOST.get('konsole_profile') or _config_get(CONFIG / 'konsolerc', 'Desktop Entry', 'DefaultProfile')
+BASELINE_KDE = HOST.get('baseline_kde_scheme', 'SweetAmbarBlue')
+BASELINE_KONSOLE = HOST.get('baseline_konsole_scheme', 'Vapor')
+PROFILE = KONSOLE_DIR / (PROFILE_NAME or '__missing_default_profile__.profile')
+
+@contextmanager
+def exclusive_operation():
+    """Cross-process safety: never let two KDT sessions change Plasma together."""
+    lock_path = ROOT / 'config/.operation.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a+') as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError('Another KDE Dynamic Themes operation is in progress.') from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.kdt-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(value, f, indent=2, ensure_ascii=False)
+            f.write('\n'); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+
+def black_png_bytes():
+    # Opaque RGB pixel #000000, no dependency on Pillow or ImageMagick.
+    def chunk(kind, data):
+        return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data) & 0xffffffff)
+    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!2I5B',1,1,8,2,0,0,0)) + chunk(b'IDAT', zlib.compress(b'\x00\x00\x00\x00')) + chunk(b'IEND', b'')
+
+def ensure_black():
+    BLACK.parent.mkdir(parents=True, exist_ok=True)
+    expected = black_png_bytes()
+    if BLACK.exists():
+        if BLACK.is_symlink() or BLACK.read_bytes() != expected:
+            raise RuntimeError('Stable black recovery image was modified; operation blocked.')
+    else:
+        with BLACK.open('xb') as f: f.write(expected)
+    return BLACK
+
+def load_json(path):
+    if path.is_symlink(): raise RuntimeError('Symlink is not allowed for transaction record: ' + str(path))
+    return json.loads(path.read_text(encoding='utf-8'))
+
+def image_now():
+    data = wallpapers_from_config(ACTIVE_CONFIG)
+    vals = [data.get(cid, {}).get('local_path') for cid in sorted(get_targets())]
+    if vals and vals[0] and all(v == vals[0] for v in vals) and Path(vals[0]).is_file(): return vals[0]
+    return None
+
+def preflight():
+    if JOURNAL.exists():
+        raise RuntimeError('A theme transition was interrupted. Use Settings → Restore Stable Baseline.')
+    if RECORD.exists():
+        raise RuntimeError('An old V1.7 wallpaper transaction record is present. Recover it before proceeding.')
+    if not PROFILE.is_file() or PROFILE.is_symlink():
+        raise RuntimeError('Default Konsole profile is missing or invalid.')
+    if _config_get(CONFIG/'konsolerc','Desktop Entry','DefaultProfile') != PROFILE_NAME:
+        raise RuntimeError('The configured Konsole profile is not the default profile.')
+    if not get_targets().issubset(wallpapers_from_config(ACTIVE_CONFIG)):
+        raise RuntimeError('The configured Plasma wallpaper containments were not found.')
+    ensure_black()
+
+def create_baseline():
+    """Register a fixed known-good baseline, even while a KDT theme is active.
+
+    Existing baselines are immutable; current desktop settings are kept only
+    as forensic copies, never mistaken for baseline values.
+    """
+    if BASELINE.exists():
+        return load_json(BASELINE)
+    preflight()
+    resolved = _scheme_id(BASELINE_KDE)
+    if resolved != BASELINE_KDE:
+        raise RuntimeError('Stable KDE scheme SweetAmbarBlue is unavailable.')
+    if not (KONSOLE_DIR / (BASELINE_KONSOLE + '.colorscheme')).is_file():
+        raise RuntimeError('Stable Konsole scheme Vapor is unavailable.')
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    snap = BACKUPS / ('baseline-v2.3-' + stamp)
+    snap.mkdir(parents=True, exist_ok=False)
+    # Captured files are diagnostic snapshots, not recovery configuration.
+    for p in (CONFIG / 'kdeglobals', PROFILE, ACTIVE_CONFIG):
+        if p.is_file() and not p.is_symlink():
+            shutil.copy2(p, snap / p.name)
+    shutil.copy2(BLACK, snap / 'baseline-black.png')
+    data = {'format': 'kdt-baseline-v2.3', 'color': BASELINE_KDE,
+            'color_id': BASELINE_KDE, 'local_color': BASELINE_KDE,
+            'local_hash': None, 'konsole': BASELINE_KONSOLE,
+            'black_sha256': sha256(BLACK), 'backup': snap.name}
+    atomic_json(BASELINE, data)
+    return data
+
+def validate_baseline(b):
+    if b.get('format')!='kdt-baseline-v2.3' or not isinstance(b.get('color_id'), str) or not isinstance(b.get('konsole'), str):
+        raise RuntimeError('Invalid stable baseline.')
+    ensure_black()
+    if sha256(BLACK)!=b.get('black_sha256'): raise RuntimeError('Baseline preta corrompida.')
+    if not (BACKUPS/b['backup']/'baseline-black.png').is_file(): raise RuntimeError('Backup da baseline ausente.')
+    if sha256(BACKUPS/b['backup']/'baseline-black.png')!=b['black_sha256']:
+        raise RuntimeError('Backup da baseline corrompido.')
+    _scheme_id(b['color'])
+    if not (KONSOLE_DIR/(b['konsole']+'.colorscheme')).is_file():
+        raise RuntimeError('Vapor Konsole color scheme was not found.')
+
+def current_state():
+    return {'color':_effective_scheme(),
+            'local_color':_config_get(CONFIG/'kdeglobals','General','ColorScheme'),
+            'local_hash':_config_get(CONFIG/'kdeglobals','General','ColorSchemeHash'),
+            'konsole':_config_get(PROFILE,'Appearance','ColorScheme'),
+            'image':image_now()}
+
+def restore_previous(prior):
+    problems=[]
+    try:
+        _apply_colors(_scheme_id(prior['color']))
+        _restore_key(CONFIG/'kdeglobals','General','ColorScheme',prior['local_color'])
+        _restore_key(CONFIG/'kdeglobals','General','ColorSchemeHash',prior['local_hash'])
+    except Exception as exc: problems.append('Plasma: '+str(exc))
+    try:
+        _restore_key(PROFILE,'Appearance','ColorScheme',prior['konsole'])
+    except Exception as exc: problems.append('Konsole: '+str(exc))
+    try:
+        backup = prior.get('image_backup')
+        if backup and Path(backup).is_file() and sha256(Path(backup)) == prior.get('image_sha256'):
+            _run(backup)
+            if not _verify(backup): problems.append('Previous wallpaper not confirmed')
+        else:
+            problems.append('Verified previous wallpaper backup unavailable; restore stable baseline')
+    except Exception as exc: problems.append('Wallpaper: '+str(exc))
+    return problems
+
+def apply(image, palette, mode):
+    with exclusive_operation():
+        return _apply_unlocked(image, palette, mode)
+
+
+def _apply_unlocked(image, palette, mode):
+    image=_safe_image(image)
+    preflight()
+    b=create_baseline()
+    validate_baseline(b)
+    prior=current_state()
+    if not prior.get('image'):
+        raise RuntimeError('Current wallpaper cannot be backed up. Restore the baseline before trying this engineering preview.')
+    if not prior['konsole']:
+        raise RuntimeError('The current Konsole color scheme could not be identified.')
+    _scheme_id(prior['color'])
+    c=extract(palette,mode)
+    stamp=datetime.now().strftime('%Y%m%d%H%M%S%f')
+    backup_image = BACKUPS / ('tx-previous-' + stamp + Path(prior['image']).suffix.lower())
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+    source = Path(prior['image'])
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeError('Cannot safely back up the current wallpaper.')
+    with backup_image.open('xb') as dest, source.open('rb') as original:
+        shutil.copyfileobj(original, dest)
+    prior['image_backup'] = str(backup_image)
+    prior['image_sha256'] = sha256(backup_image)
+    name='KDT'+stamp
+    kde=COLOR_DIR/(name+'.colors')
+    konsole=KONSOLE_DIR/(name+'.colorscheme')
+    if kde.exists() or konsole.exists(): raise RuntimeError('Generated theme name conflict; no changes made.')
+    # Record exact pre-change state before touching active KDE files.
+    tx={'format':'kdt-transaction-v2.3','prior':prior,'target':str(image),
+        'kde':str(kde),'konsole_file':str(konsole),'phase':'prepared'}
+    atomic_json(JOURNAL,tx)
+    try:
+        kde.parent.mkdir(parents=True,exist_ok=True)
+        konsole.parent.mkdir(parents=True,exist_ok=True)
+        with kde.open('x') as f: f.write(kde_scheme(c,mode,name))
+        with konsole.open('x') as f: f.write(konsole_scheme(c,name))
+        _apply_colors(name)
+        _kwrite(PROFILE,'Appearance','ColorScheme',name)
+        if _config_get(PROFILE,'Appearance','ColorScheme')!=name:
+            raise RuntimeError('Konsole profile was not updated.')
+        _run(image)
+        if not _verify(image): raise RuntimeError('Wallpaper could not be confirmed on both monitors.')
+        tx['phase']='applied'
+        atomic_json(JOURNAL,tx)
+        atomic_json(ACTIVE,{'format':'kdt-active-v2.3','scheme':name,'wallpaper':str(image)})
+        JOURNAL.unlink()
+        # Do not remove previous generated schemes here: open Konsole windows may still use them.
+        # Preserve legacy transaction record as an archive for audit, after successful migration.
+        if STATE.exists():
+            archive=BACKUPS/('legacy-transaction-'+stamp+'.json')
+            shutil.copy2(STATE,archive)
+            STATE.unlink()
+        return 'Theme applied on both monitors; Plasma and Konsole colors updated. You can apply another theme directly.'
+    except Exception as exc:
+        errors=restore_previous(prior)
+        if errors:
+            tx['phase']='recovery-needed';tx['problems']=errors
+            atomic_json(JOURNAL,tx)
+            raise RuntimeError('Theme application failed: '+str(exc)+'\nPartial rollback: '+'; '.join(errors)+'\nUse Restore Stable Baseline.') from exc
+        JOURNAL.unlink()
+        raise RuntimeError('Theme application failed; previous state restored: '+str(exc)) from exc
+
+def recover_baseline():
+    with exclusive_operation():
+        return _recover_baseline_unlocked()
+
+
+def _recover_baseline_unlocked():
+    preflight_for_recovery()
+    b=load_json(BASELINE)
+    validate_baseline(b)
+    # Keep the journal if anything fails, so recovery can be repeated safely.
+    tx={'format':'kdt-baseline-recovery-v2.3','phase':'started'}
+    if not JOURNAL.exists(): atomic_json(JOURNAL,tx)
+    errors=[]
+    try:
+        _apply_colors(b['color_id'])
+        _restore_key(CONFIG/'kdeglobals','General','ColorScheme',b['local_color'])
+        _restore_key(CONFIG/'kdeglobals','General','ColorSchemeHash',b['local_hash'])
+    except Exception as exc: errors.append('Plasma: '+str(exc))
+    try:
+        _restore_key(PROFILE,'Appearance','ColorScheme',b['konsole'])
+    except Exception as exc: errors.append('Konsole: '+str(exc))
+    try:
+        _run(BLACK)
+        if not _verify(BLACK): errors.append('Black wallpaper could not be confirmed on both monitors')
+    except Exception as exc: errors.append('Wallpaper: '+str(exc))
+    if errors:
+        raise RuntimeError('Recovery incomplete: '+'; '.join(errors)+'; recovery journal preserved.')
+    if ACTIVE.exists(): ACTIVE.unlink()
+    if STATE.exists():
+        # Legacy pending state is no longer active, but retain an audit copy.
+        archive=BACKUPS/('legacy-recovered-'+datetime.now().strftime('%Y%m%d%H%M%S%f')+'.json')
+        shutil.copy2(STATE,archive);STATE.unlink()
+    if JOURNAL.exists(): JOURNAL.unlink()
+    return 'Stable baseline restored: black wallpaper, Sweet-Ambar-Blue and Konsole Vapor. Open a new Konsole window to verify.'
+
+def preflight_for_recovery():
+    ensure_black()
+    if not BASELINE.exists():
+        if JOURNAL.exists():
+            raise RuntimeError('Interrupted transaction without baseline; manual inspection required.')
+        create_baseline()
+    if not PROFILE.is_file() or PROFILE.is_symlink(): raise RuntimeError('Default Konsole profile is missing or invalid.')

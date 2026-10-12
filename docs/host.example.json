@@ -1,0 +1,7 @@
+{
+  "expected_monitors": 2,
+  "containment_ids": ["10", "11"],
+  "konsole_profile": "YourProfile.profile",
+  "baseline_kde_scheme": "SweetAmbarBlue",
+  "baseline_konsole_scheme": "Vapor"
+}
