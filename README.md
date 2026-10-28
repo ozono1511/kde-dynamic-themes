@@ -1,8 +1,8 @@
-# KDE Dynamic Themes 3.0
+# KDE Dynamic Themes 3.0.2
 
 A lightweight wallpaper and color gallery for **Bazzite + KDE Plasma 6**. Pick an image, preview its Matugen palette, and apply matching Plasma and Konsole colors with a single click. Includes direct theme switching and a stable recovery baseline (solid black wallpaper, Sweet-Ambar-Blue KDE scheme, Konsole Vapor).
 
-**Status:** 3.0 desktop release package. The core application was validated on an actual dual-monitor Bazzite system in engineering 2.6.1. The v3 desktop-launcher install must still be validated on the target machine. Source is prepared for a public GitHub repository, but no repository is currently published.
+**Current version:** 3.0.2. The application maps Plasma's current activity to physical Wayland monitor outputs and lets you choose which monitors to update. Ambiguous or incomplete monitor mappings fail closed. When only some monitors are selected, only their wallpapers change; Plasma color schemes and the default Konsole profile change only when all active monitors are selected.
 
 ## Install on Bazzite (no sudo)
 
