@@ -18,7 +18,7 @@ import shutil
 import sys
 import tempfile
 
-VERSION = "3.0.0"
+VERSION = "3.0.2"
 MARKER = "KDT_MANAGED_v3"
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "src" / "kde_dynamic_themes"
@@ -61,7 +61,11 @@ def check_existing_current(p: dict[str, Path]) -> None:
         raise RuntimeError(f"Current installation path is not a managed symlink: {current}")
     resolved = current.resolve()
     # An existing symlink is managed only if its target has our release manifest.
-    if not resolved.is_relative_to(p["data"] / "releases") or not (resolved / ".kdt-release.json").is_file():
+    # Bazzite commonly exposes the home directory as /home/<user> while the
+    # same files resolve under /var/home/<user>. Compare canonical paths so a
+    # valid managed release is not mistaken for an external symlink target.
+    releases = (p["data"] / "releases").resolve()
+    if not resolved.is_relative_to(releases) or not (resolved / ".kdt-release.json").is_file():
         raise RuntimeError(f"Current installation points outside a managed release: {current}")
 
 

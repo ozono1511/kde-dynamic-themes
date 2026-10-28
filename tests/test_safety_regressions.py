@@ -30,6 +30,13 @@ def test_recovery_does_not_mutate_when_baseline_corrupted(tmp_path, monkeypatch)
     baseline.write_text(json.dumps({'format': 'invalid'}))
     monkeypatch.setattr(engine,'BASELINE',baseline)
     monkeypatch.setattr(engine,'JOURNAL',config/'journal.json')
+    monkeypatch.setattr(engine,'get_target_map',lambda: {'94': 0, '95': 1})
+    monkeypatch.setattr(engine,'validate_target_map',lambda targets, **_kw: {
+        'screen_count': 2, 'desktops': [
+            {'id': cid, 'screen': screen, 'wallpaperPlugin': 'org.kde.image'}
+            for cid, screen in targets.items()
+        ]
+    })
     monkeypatch.setattr(engine,'preflight_for_recovery',lambda: None)
     marker=[]
     monkeypatch.setattr(engine,'_apply_colors',lambda x: marker.append('applied'))

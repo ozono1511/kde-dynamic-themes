@@ -37,6 +37,21 @@ def test_installation_isolated_idempotent_and_verified(tmp_path):
     assert not verify.inspect(home, env={})
 
 
+def test_current_symlink_accepts_home_path_alias(tmp_path):
+    canonical_home = tmp_path / "var-home" / "ozono"
+    canonical_home.mkdir(parents=True)
+    alias_home = tmp_path / "home" / "ozono"
+    alias_home.parent.mkdir()
+    alias_home.symlink_to(canonical_home, target_is_directory=True)
+
+    p = install.paths(alias_home, {})
+    p["release"].mkdir(parents=True)
+    (p["release"] / ".kdt-release.json").write_text('{"version":"3.0.0"}\n')
+    p["current"].symlink_to(p["release"])
+
+    install.check_existing_current(p)
+
+
 def test_install_refuses_overwriting_unmanaged_launcher(tmp_path):
     home = tmp_path / "user"
     home.mkdir()

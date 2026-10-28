@@ -4,12 +4,12 @@ Esta versão é voltada principalmente para o Bazzite/KDE do autor. **Não apaga
 
 ## Instalando
 
-1. Salve e extraia `kde-dynamic-themes-v3.0.0.zip` em `~/Downloads`.
+1. Salve e extraia `kde-dynamic-themes-v3.0.2.zip` em `~/Downloads`.
 2. Feche as versões anteriores do KDE Dynamic Themes.
 3. No Konsole, execute:
 
 ```bash
-cd "$HOME/Downloads/kde-dynamic-themes-v3.0.0"
+cd "$HOME/Downloads/kde-dynamic-themes-v3.0.2"
 python3 scripts/install.py
 ```
 
@@ -24,7 +24,7 @@ python3 scripts/verify_install.py --doctor
 ~/.local/bin/kde-dynamic-themes --doctor
 ```
 
-Os comandos de diagnóstico são somente de leitura. A troca de wallpaper e os ajustes no Plasma/Konsole só ocorrem quando você escolhe explicitamente Apply Theme ou Restore Stable Baseline na janela.
+Os comandos de diagnóstico são somente de leitura. Antes de aplicar, a janela mostra os monitores físicos identificados pelo Plasma e permite escolher um ou mais. Uma seleção parcial altera apenas os wallpapers escolhidos; como o esquema de cores do Plasma e o perfil padrão do Konsole são globais, eles só mudam quando todos os monitores ativos estão selecionados.
 
 ## Estado de recuperação
 

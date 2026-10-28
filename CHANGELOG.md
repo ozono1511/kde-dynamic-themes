@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.2 — Current-activity monitor mapping
+
+- Scope desktop discovery to Plasma's current activity, then match its screen geometry to the physical Wayland outputs reported by Qt.
+- Retain fail-closed behavior when monitor geometry or containment assignments are incomplete or ambiguous.
+
+## 3.0.1 — Physical monitor selection
+
+- Added an explicit monitor picker showing output name/model, pixel resolution, refresh rate, position, and validated Plasma containment ID.
+- Matched Plasma screen geometry to Qt Wayland output geometry and fail closed when inventories do not match uniquely.
+- Added select-all, clear, confirm, cancel, and monitor-scoped wallpaper application. Partial selections leave global Plasma and Konsole colors unchanged.
+- Added regression coverage for physical monitor mapping, partial selections, residual containment preservation, and dialog cancellation.
+- Fixed installer path validation for Bazzite's `/home` to `/var/home` alias and install into a new versioned release.
+
 ## 3.0.0 — Desktop release
 
 - Productized the Bazzite-validated V2.6.1/2.6.2 stable module layout.

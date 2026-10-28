@@ -9,7 +9,7 @@ A lightweight wallpaper and color gallery for **Bazzite + KDE Plasma 6**. Pick a
 Unzip the release in Downloads, then run:
 
 ```bash
-cd "$HOME/Downloads/kde-dynamic-themes-v3.0.0"
+cd "$HOME/Downloads/kde-dynamic-themes-v3.0.2"
 python3 scripts/install.py
 ```
 
@@ -27,10 +27,11 @@ See [installation instructions in Portuguese](docs/INSTALL_PT.md) and [dependenc
 
 - User wallpapers, Matugen binary, backups, palettes, baseline and Konsole profiles are **not included** in the release/GitHub repository.
 - The application reads/writes its existing live data in `~/Projects/kde-dynamic-themes` (or `KDT_PROJECT_ROOT`). Nothing is migrated automatically.
-- Installed program files: `${XDG_DATA_HOME:-~/.local/share}/kde-dynamic-themes/releases/3.0.0/` and a `current` symlink.
+- Installed program files: `${XDG_DATA_HOME:-~/.local/share}/kde-dynamic-themes/releases/3.0.2/` and a `current` symlink.
 - Installed menu integration: `~/.local/share/applications/kde-dynamic-themes.desktop`, `~/.local/bin/kde-dynamic-themes`, and a user-local SVG icon.
 - Baseline recovery changes *desktop state* only after explicit confirmation in the GUI; the installer itself is read-only with respect to desktop settings.
 - A transaction journal is preserved on partial recovery failure. Do not delete backup or journal files manually to clear such a failure.
+- Before applying, the app matches Plasma desktop geometry with Wayland monitor outputs and asks which physical monitors to change. A partial selection changes only those wallpapers; KDE color schemes and the default Konsole profile are global and are left unchanged unless all active monitors are selected.
 
 To remove only the menu launcher: `python3 scripts/uninstall.py`. See [maintenance and cleanup](docs/CLEANUP.md). The old validated application remains in the original `app/` folder as a fallback.
 

@@ -11,10 +11,14 @@ from PySide6.QtGui import QColor, QIcon, QImageReader, QPixmap, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
-    QComboBox, QDoubleSpinBox, QInputDialog, QDialog,
+    QComboBox, QDoubleSpinBox, QInputDialog, QDialog, QCheckBox,
 )
 
 from .engine import apply as apply_theme_direct, recover_baseline, JOURNAL
+from .platform import (HOST_FILE, WALLPAPER_CONFIG, active_target_map,
+    physical_monitor_records, query_plasma_desktops, read_host_config,
+    resolve_active_desktop_map, save_containment_ids, selected_monitor_targets,
+    validate_target_map)
 
 from .paths import PROJECT_ROOT
 ROOT = PROJECT_ROOT
@@ -28,6 +32,169 @@ SCHEMES = ['scheme-tonal-spot', 'scheme-vibrant', 'scheme-expressive',
            'scheme-fidelity', 'scheme-content', 'scheme-neutral', 'scheme-monochrome']
 COLOR_KEYS = ['background', 'surface', 'surface_container', 'on_surface',
               'primary', 'on_primary', 'secondary', 'tertiary', 'outline']
+
+
+def _qt_monitor_outputs():
+    app = QApplication.instance()
+    if app is None:
+        raise RuntimeError('The KDE Dynamic Themes graphical session is not available.')
+    outputs = []
+    for screen in app.screens():
+        rect = screen.geometry()
+        ratio = float(screen.devicePixelRatio())
+        size = screen.size()
+        outputs.append({
+            'name': screen.name() or None,
+            'manufacturer': screen.manufacturer() or None,
+            'model': screen.model() or None,
+            'serial_number': screen.serialNumber() or None,
+            'geometry': {'x': rect.x(), 'y': rect.y(), 'width': rect.width(), 'height': rect.height()},
+            'pixel_size': {'width': round(size.width() * ratio), 'height': round(size.height() * ratio)},
+            'refresh_rate': float(screen.refreshRate()),
+        })
+    return outputs
+
+
+class MonitorSelectionDialog(QDialog):
+    """Explicit, testable picker for Plasma-identified physical monitor targets."""
+    def __init__(self, monitors, initially_selected=None, parent=None):
+        super().__init__(parent)
+        if not monitors:
+            raise ValueError('Plasma did not identify any physical monitors with a trusted desktop mapping.')
+        self.monitors = monitors
+        self.targets = None
+        self.setWindowTitle('Choose monitors')
+        self.resize(650, min(560, 180 + 84 * len(monitors)))
+        layout = QVBoxLayout(self)
+        intro = QLabel('Choose which physical monitors this operation may change. Only monitors uniquely '
+                       'matched to active Plasma desktops are listed.')
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.checkboxes = {}
+        initially_selected = set(
+            [m['containment_id'] for m in monitors]
+            if initially_selected is None else initially_selected
+        )
+        for item in monitors:
+            name = item.get('name') or 'Name unavailable'
+            identity = ' '.join(filter(None, (item.get('manufacturer'), item.get('model')))) or 'Model unavailable'
+            pixels = item.get('pixel_size') or {}
+            resolution = (f"{pixels['width']}×{pixels['height']} px"
+                          if pixels.get('width') and pixels.get('height') else 'Resolution unavailable')
+            rate = item.get('refresh_rate')
+            refresh = f'{rate:g} Hz' if isinstance(rate, (int, float)) and rate > 0 else 'Refresh rate unavailable'
+            geo = item['geometry']
+            label = (f"{name} — {identity}\n{resolution} · {refresh} · position ({geo['x']}, {geo['y']}) · "
+                     f"containment {item['containment_id']}")
+            check = QCheckBox(label)
+            check.setChecked(item['containment_id'] in initially_selected)
+            check.stateChanged.connect(self._update_state)
+            self.checkboxes[item['containment_id']] = check
+            layout.addWidget(check)
+        self.summary = QLabel()
+        layout.addWidget(self.summary)
+        actions = QHBoxLayout()
+        self.select_all_button = QPushButton('Select all')
+        self.clear_button = QPushButton('Clear selection')
+        actions.addWidget(self.select_all_button)
+        actions.addWidget(self.clear_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.cancel_button = QPushButton('Cancel')
+        self.confirm_button = QPushButton('Confirm selection')
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.confirm_button)
+        layout.addLayout(buttons)
+        self.select_all_button.clicked.connect(self.select_all)
+        self.clear_button.clicked.connect(self.clear_selection)
+        self.cancel_button.clicked.connect(self.reject)
+        self.confirm_button.clicked.connect(self.confirm_selection)
+        self._update_state()
+
+    def selected_ids(self):
+        return [cid for cid, checkbox in self.checkboxes.items() if checkbox.isChecked()]
+
+    def select_all(self):
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(True)
+
+    def clear_selection(self):
+        for checkbox in self.checkboxes.values():
+            checkbox.setChecked(False)
+
+    def _update_state(self, *_args):
+        selected = len(self.selected_ids())
+        self.summary.setText(f'{selected} of {len(self.checkboxes)} monitors selected')
+        self.confirm_button.setEnabled(selected > 0)
+
+    def confirm_selection(self):
+        self.targets = selected_monitor_targets(self.monitors, self.selected_ids())
+        self.accept()
+
+
+def monitor_dialog_result(dialog, result):
+    """Return explicit targets only after the dialog's Confirm action."""
+    if result != QDialog.DialogCode.Accepted or not dialog.targets:
+        return None
+    return dialog.targets
+
+
+def choose_wallpaper_targets(parent, operation, *, force=False):
+    """Match physical Qt outputs to Plasma desktops, then require explicit choice."""
+    try:
+        live = query_plasma_desktops()
+        raw = WALLPAPER_CONFIG.read_text(encoding='utf-8', errors='replace')
+        host = read_host_config()
+        try:
+            target_map = active_target_map(WALLPAPER_CONFIG, host, live)
+        except ValueError:
+            # A stale host mapping is never silently accepted; an independently
+            # unambiguous live Plasma mapping can be offered for explicit confirmation.
+            target_map = resolve_active_desktop_map(raw, live)
+        monitors = physical_monitor_records(target_map, live, _qt_monitor_outputs())
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        QMessageBox.warning(parent, 'Monitor mapping unavailable',
+            f'KDE Plasma could not identify every active physical monitor and its desktop safely: {exc}\n\n'
+            'No wallpaper, KDE color scheme, or Konsole profile changes were made.')
+        return None
+    dialog = MonitorSelectionDialog(monitors, initially_selected=target_map.keys(), parent=parent)
+    selected = monitor_dialog_result(dialog, dialog.exec())
+    if selected is None:
+        return None
+    full_selection = set(selected.values()) == set(range(live['screen_count']))
+    if force and not full_selection:
+        QMessageBox.information(parent, 'Incomplete monitor mapping',
+            'Desktop settings require one validated containment for every active monitor. '
+            'No persistent host.json change was made.')
+        return None
+    if full_selection:
+        mapping_changed = sorted(selected) != sorted(host.get('containment_ids', []))
+        monitor_count_changed = ('expected_monitors' in host
+                                 and host['expected_monitors'] != live['screen_count'])
+        if mapping_changed or monitor_count_changed:
+            answer = QMessageBox.question(parent, 'Save desktop mapping',
+                f'Save {sorted(selected)} for {live["screen_count"]} active monitors to {HOST_FILE}? '
+                'The previous host.json will be backed up first.')
+            if answer == QMessageBox.StandardButton.Yes:
+                try:
+                    save_containment_ids(sorted(selected), expected_monitors=live['screen_count'])
+                except (OSError, ValueError) as exc:
+                    QMessageBox.critical(parent, 'Could not save desktop mapping', str(exc))
+                    return None
+    return selected
+
+
+def _selection_is_complete(parent, targets):
+    try:
+        live = query_plasma_desktops()
+        validate_target_map(targets, live, require_full_coverage=False)
+        return set(targets.values()) == set(range(live['screen_count']))
+    except (ValueError, RuntimeError, OSError) as exc:
+        QMessageBox.warning(parent, 'Monitor layout changed',
+            f'The monitor layout could not be revalidated after selection: {exc}\nNo changes were made.')
+        return None
 
 
 APP_STYLESHEET = """
@@ -472,27 +639,51 @@ class Gallery(QWidget):
             QMessageBox.warning(self, 'Recovery required',
                 'A theme transition was interrupted. Use Settings → Restore Stable Baseline.')
             return
-        answer = QMessageBox.question(self, 'Apply Theme',
-            'Apply this wallpaper and its colors to Plasma and Konsole?\n'
-            'The active theme will be replaced directly.')
+        targets = choose_wallpaper_targets(self, 'theme application')
+        if targets is None:
+            return
+        global_theme = _selection_is_complete(self, targets)
+        if global_theme is None:
+            return
+        scope = (f"Apply the wallpaper to the selected monitor containments {sorted(targets)}, and apply the "
+                 'color scheme to all monitors and the default Konsole profile?'
+                 if global_theme else
+                 f"Apply the wallpaper only to the selected monitor containments {sorted(targets)}? "
+                 'KDE and Konsole colors are global, so they will remain unchanged for this partial selection.')
+        answer = QMessageBox.question(self, 'Apply Theme', scope + '\nThe operation will be verified and rolled back if it fails.')
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            result = apply_theme_direct(self.current_path, self.generated_palette, self.mode.currentText())
+            result = apply_theme_direct(self.current_path, self.generated_palette, self.mode.currentText(),
+                                        targets, apply_global_theme=global_theme)
             QMessageBox.information(self, 'Theme applied', result)
         except Exception as exc:
             QMessageBox.critical(self, 'Application not completed', str(exc))
 
     def restore_stable(self):
-        answer = QMessageBox.question(self, 'Restore Stable Baseline',
-            'Apply a BLACK background on both monitors, Sweet-Ambar-Blue colors, and Konsole Vapor?\n'
-            'This action always restores the stable baseline, not the previous theme.')
+        targets = choose_wallpaper_targets(self, 'baseline recovery')
+        if targets is None:
+            return
+        global_theme = _selection_is_complete(self, targets)
+        if global_theme is None:
+            return
+        if global_theme:
+            scope = (f"Apply black wallpaper to containments {sorted(targets)}, Sweet-Ambar-Blue colors, "
+                     'and Konsole Vapor? This restores the full stable baseline.')
+        else:
+            scope = (f"Apply black wallpaper only to selected monitor containments {sorted(targets)}? "
+                     'Global KDE and Konsole colors will remain unchanged.')
+        answer = QMessageBox.question(self, 'Restore Stable Baseline', scope)
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            QMessageBox.information(self, 'Baseline restored', recover_baseline())
+            QMessageBox.information(self, 'Baseline restored',
+                                    recover_baseline(targets, apply_global_theme=global_theme))
         except Exception as exc:
             QMessageBox.critical(self, 'Recovery incomplete', str(exc))
+
+    def configure_desktop_targets(self):
+        choose_wallpaper_targets(self, 'desktop target configuration', force=True)
 
     def open_advanced(self):
         dialog = QDialog(self)
@@ -507,6 +698,7 @@ class Gallery(QWidget):
         for title, callback in (
             ('Add Images', self.add_folder),
             ('Manage Folders', self.remove_folder),
+            ('Configure Desktop Targets', self.configure_desktop_targets),
         ):
             button = QPushButton(title)
             button.clicked.connect(callback)
